@@ -104,6 +104,35 @@ pub(crate) struct Annotations {
     derives: Vec<String>,
     /// List of explicit attributes for this type.
     attributes: Vec<String>,
+    /// Whether this field should be wrapped with Option.
+    ///
+    /// This is controlled by the `optional` attribute. For integer types, generates
+    /// Option<NonZeroXXX>; for pointers, generates Option<NonNull<T>>. 
+    /// 
+    /// This will safely have the same representation as the original type for
+    /// any type that guarentees the niche optimization. 
+    /// See: https://doc.rust-lang.org/core/option/#representation
+    ///
+    /// ```cpp
+    /// struct Foo {
+    ///     /// <div rustbindgen optional />
+    ///     uint64_t id;
+    ///     /// <div rustbindgen optional />
+    ///     void* ptr;
+    /// };
+    /// ```
+    ///
+    /// In that case, bindgen will generate:
+    /// ```rust
+    /// # use std::ptr::NonNull;
+    /// # use std::ffi::c_void;
+    /// # use std::num::NonZeroU64;
+    /// struct Foo {
+    ///   pub id: Option<NonZeroU64>,
+    ///   pub ptr: Option<NonNull<c_void>>,
+    /// }
+    /// ```
+    optional: bool,
 }
 
 fn parse_accessor(s: &str) -> FieldAccessorKind {
@@ -242,6 +271,9 @@ impl Annotations {
                         self.accessor_kind = Some(parse_accessor(&attr.value));
                     }
                     "constant" => self.constify_enum_variant = true,
+                    "optional" => {
+                        self.optional = attr.value.is_empty() || attr.value == "true";
+                    }
                     _ => {}
                 }
             }
@@ -255,5 +287,10 @@ impl Annotations {
     /// Returns whether we've parsed a "constant" attribute.
     pub(crate) fn constify_enum_variant(&self) -> bool {
         self.constify_enum_variant
+    }
+
+    /// Returns whether this field should be wrapped in Option<NonZeroXXX>.
+    pub(crate) fn optional(&self) -> bool {
+        self.optional
     }
 }

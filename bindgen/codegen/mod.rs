@@ -1529,6 +1529,64 @@ fn wrap_union_field_if_needed(
     }
 }
 
+/// Wraps a field type using Option with guaranteed niche optimization.
+///
+/// For integer types, generates Option<NonZeroXXX>.
+/// For pointer types, generates Option<NonNull<T>>.
+/// Silently returns the original type for other input types.
+///
+/// Zero values in c will become None in Rust.
+///
+/// See: https://doc.rust-lang.org/core/option/#representation
+fn wrap_field_in_option_niche(
+    ctx: &BindgenContext,
+    ty: syn::Type,
+    field_ty: &Type,
+) -> syn::Type {
+    use crate::ir::int::IntKind;
+    use crate::ir::ty::TypeKind;
+
+    let canonical_ty = field_ty.canonical_type(ctx);
+    let prefix = ctx.trait_prefix();
+
+    if let TypeKind::Int(int_kind) = canonical_ty.kind() {
+        let nonzero_ty = match int_kind {
+            IntKind::I8 | IntKind::SChar => quote! { ::#prefix::num::NonZeroI8 },
+            IntKind::U8 | IntKind::UChar => quote! { ::#prefix::num::NonZeroU8 },
+            IntKind::I16 | IntKind::Short => quote! { ::#prefix::num::NonZeroI16 },
+            IntKind::U16 | IntKind::UShort => quote! { ::#prefix::num::NonZeroU16 },
+            IntKind::I32 => quote! { ::#prefix::num::NonZeroI32 },
+            IntKind::U32 => quote! { ::#prefix::num::NonZeroU32 },
+            IntKind::I64 | IntKind::LongLong => quote! { ::#prefix::num::NonZeroI64 },
+            IntKind::U64 | IntKind::ULongLong => quote! { ::#prefix::num::NonZeroU64 },
+            IntKind::I128 => quote! { ::#prefix::num::NonZeroI128 },
+            IntKind::U128 => quote! { ::#prefix::num::NonZeroU128 },
+
+            IntKind::Int | IntKind::UInt | IntKind::Long | IntKind::ULong => {
+                match canonical_ty.layout(ctx).map(|l| (l.size, int_kind.is_signed())) {
+                    Some((4, true)) => quote! { ::#prefix::num::NonZeroI32 },
+                    Some((4, false)) => quote! { ::#prefix::num::NonZeroU32 },
+                    Some((8, true)) => quote! { ::#prefix::num::NonZeroI64 },
+                    Some((8, false)) => quote! { ::#prefix::num::NonZeroU64 },
+                    _ => return ty,
+                }
+            }
+
+            _ => return ty,
+        };
+
+        syn::parse_quote! { ::#prefix::option::Option<#nonzero_ty> }
+    } else if let TypeKind::Pointer(inner) = canonical_ty.kind() {
+        // For pointer types, wrap in Option<NonNull<T>>
+        // The inner type should already be properly resolved
+        let inner_ty = inner.into_resolver().through_type_refs().resolve(ctx);
+        let inner_tokens = inner_ty.to_rust_ty_or_opaque(ctx, &());
+        syn::parse_quote! { ::#prefix::option::Option<::#prefix::ptr::NonNull<#inner_tokens>> }
+    } else {
+        ty
+    }
+}
+
 impl FieldCodegen<'_> for FieldData {
     type Extra = ();
 
@@ -1592,6 +1650,12 @@ impl FieldCodegen<'_> for FieldData {
                     syn::parse_quote! { __IncompleteArrayField<#inner> }
                 }
             }
+        } else {
+            ty
+        };
+
+        let ty = if self.annotations().optional() {
+            wrap_field_in_option_niche(ctx, ty, field_ty)
         } else {
             ty
         };
